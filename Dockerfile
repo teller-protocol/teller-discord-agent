@@ -1,4 +1,5 @@
-FROM rust:1.83-slim as builder
+# Compile the Rust binary
+FROM rust:1.83.0-slim-bullseye AS builder
 
 WORKDIR /usr/src/app
 COPY . .
@@ -17,7 +18,7 @@ FROM debian:bullseye-slim
 
 # Install OpenSSL and CA certificates for HTTPS requests
 RUN apt-get update && \
-    apt-get install -y ca-certificates libssl1.1 && \
+    apt-get install -y ca-certificates  && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -27,4 +28,5 @@ WORKDIR /app
 COPY --from=builder /usr/src/app/target/release/discord-proxy-bot /app/discord-proxy-bot
 
 # Run the binary
-CMD ["./discord-proxy-bot"]
+
+ENTRYPOINT ["/app/discord-proxy-bot"]

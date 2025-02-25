@@ -1,7 +1,7 @@
-use anyhow::Result;
+use crate::types::*;
+use anyhow::{Result, anyhow};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use serenity::all::{CommandDataOptionValue, CreateCommand, GatewayIntents, Interaction};
+use serenity::all::{CommandDataOptionValue, CreateCommand, CreateInteractionResponseMessage, GatewayIntents, Interaction};
 use serenity::async_trait;
 use serenity::builder::{CreateCommandOption, CreateInteractionResponse};
 use serenity::client::{Client as DiscordClient, Context, EventHandler};
@@ -9,27 +9,17 @@ use serenity::model::application::CommandOptionType;
 use serenity::model::gateway::Ready;
 use std::env;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use tracing::{error, info};
 use warp::Filter;
 
-// Structure for the POST request
-#[derive(Serialize)]
-struct ProxyRequest {
-    query: String,
-}
-
-// Structure for the POST response
-#[derive(Deserialize, Debug)]
-struct ProxyResponse {
-    response: String,
-}
+mod types;
 
 struct Handler {
     http_client: Client,
     target_url: String,
 }
+
+
 
 #[async_trait]
 impl EventHandler for Handler {
@@ -49,26 +39,45 @@ impl EventHandler for Handler {
 
                 info!("Forwarding query: {}", query);
 
-                let response = match self.forward_query(query).await {
-                    Ok(resp) => resp,
+                let response_result = self.forward_query(query).await;
+                
+                match response_result {
+                    Ok(resp) => {
+
+
+
+                        let message_builder = build_discord_message_from_chat_response ( resp ); 
+
+                       
+                        // Send the response with all the components
+                        if let Err(e) = command
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(message_builder),
+                            )
+                            .await
+                        {
+                            error!("Error responding to slash command: {:?}", e);
+                        }
+
+
+                    },
                     Err(e) => {
                         error!("Error forwarding query: {:?}", e);
-                        "Sorry, there was an error processing your request.".to_string()
+                        // Handle error response
+                        if let Err(e) = command
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    serenity::builder::CreateInteractionResponseMessage::new()
+                                        .content("Sorry, there was an error processing your request.")
+                                ),
+                            )
+                            .await
+                        {
+                            error!("Error responding to slash command: {:?}", e);
+                        }
                     }
-                };
-
-                // Respond to the Discord interaction
-                if let Err(e) = command
-                    .create_response(
-                        &ctx.http,
-                        CreateInteractionResponse::Message(
-                            serenity::builder::CreateInteractionResponseMessage::new()
-                                .content(response),
-                        ),
-                    )
-                    .await
-                {
-                    error!("Error responding to slash command: {:?}", e);
                 }
             }
         }
@@ -98,26 +107,23 @@ impl EventHandler for Handler {
 }
 
 impl Handler {
-    async fn forward_query(&self, query: String) -> Result<String> {
+    async fn forward_query(&self, body: String) -> Result<ChatMessageOutput> {
         // Forward the query to the target service
         let response = self
             .http_client
             .post(&self.target_url)
-            .json(&ProxyRequest { query })
+            .json(&ChatMessageInput { body, api_key: None })
             .send()
             .await?;
 
         if response.status().is_success() {
-            let proxy_response: ProxyResponse = response.json().await?;
-            Ok(proxy_response.response)
+            let proxy_response: ChatMessageOutput = response.json().await?;
+            Ok(proxy_response)
         } else {
             let status = response.status();
             let text = response.text().await?;
             error!("Error from target service: {} - {}", status, text);
-            Ok(format!(
-                "The target service returned an error: {} - {}",
-                status, text
-            ))
+            Err(anyhow!("Error from target service: {} - {}", status, text))
         }
     }
 }
@@ -134,7 +140,7 @@ async fn main() -> Result<()> {
     let token = env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
     
     // Target URL for forwarding requests
-    let target_url = env::var("TARGET_URL").expect("Expected a target URL in the environment");
+    let target_url = env::var("PROXY_TARGET_URL").expect("Expected a target URL in the environment");
 
     let http_client = Client::new();
 
@@ -177,4 +183,67 @@ async fn main() -> Result<()> {
     }
     
     Ok(())
+}
+
+
+
+// ------------- 
+
+fn build_discord_message_from_chat_response( resp: ChatMessageOutput )
+             -> CreateInteractionResponseMessage {
+
+
+
+                  let mut message_builder = serenity::builder::CreateInteractionResponseMessage::new()
+                            .content(resp.body);
+                        
+                        // Check if we have transaction data to display
+                        if let Some(tx_array) = resp.tx_array {
+                            if !tx_array.is_empty() {
+                                // Create a table or formatted block for transactions
+                                let mut tx_formatted = String::from("```\nTransaction Details:\n");
+                                tx_formatted.push_str("----------------------------------------\n");
+                                
+                                for (i, tx) in tx_array.iter().enumerate() {
+                                    tx_formatted.push_str(&format!("Transaction #{}\n", i + 1));
+                                    tx_formatted.push_str(&format!("Chain ID: {}\n", tx.chain_id));
+                                    tx_formatted.push_str(&format!("To: {}\n", tx.to_address));
+                                    
+                                    if let Some(desc) = &tx.description {
+                                        tx_formatted.push_str(&format!("Description: {}\n", desc));
+                                    }
+                                    
+                                    tx_formatted.push_str("----------------------------------------\n");
+                                }
+                                
+                                tx_formatted.push_str("```");
+                                message_builder = message_builder.add_embed(
+                                    serenity::builder::CreateEmbed::new()
+                                        .title("Transactions")
+                                        .description(tx_formatted)
+                                        .color(0x00FF00)
+                                );
+                            }
+                        }
+                        
+                        // Check if we have structured data to display
+                        if let Some(structured_data) = resp.structured_data {
+                            // Convert structured data to a formatted string
+                            let formatted_data = match serde_json::to_string_pretty(&structured_data) {
+                                Ok(json_str) => format!("```json\n{}\n```", json_str),
+                                Err(_) => String::from("```\nUnable to format structured data\n```")
+                            };
+                            
+                            message_builder = message_builder.add_embed(
+                                serenity::builder::CreateEmbed::new()
+                                    .title("Additional Data")
+                                    .description(formatted_data)
+                                    .color(0x0000FF)
+                            );
+                        }
+
+
+                    message_builder
+                        
+
 }

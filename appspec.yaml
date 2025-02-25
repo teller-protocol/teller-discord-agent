@@ -1,0 +1,32 @@
+# This is the App Platform specification file
+# https://docs.digitalocean.com/products/app-platform/reference/app-spec/
+
+name: discord-proxy-bot
+region: nyc
+services:
+- name: discord-proxy-bot
+  github:
+    repo: yourusername/discord-proxy-bot
+    branch: main
+    deploy_on_push: true
+  build_command: cargo build --release
+  run_command: ./target/release/discord-proxy-bot
+  http_port: 8080
+  instance_count: 1
+  instance_size_slug: basic-xxs
+  envs:
+  - key: DISCORD_TOKEN
+    scope: RUN_TIME
+    value: ${DISCORD_TOKEN}
+    type: SECRET
+  - key: TARGET_URL
+    scope: RUN_TIME
+    value: ${TARGET_URL}
+    type: SECRET
+  health_check:
+    http_path: /health
+    initial_delay_seconds: 10
+    period_seconds: 10
+    timeout_seconds: 5
+    success_threshold: 1
+    failure_threshold: 3
